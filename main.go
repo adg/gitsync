@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -17,6 +18,28 @@ import (
 
 	"golang.org/x/build/gerrit"
 )
+
+func main() {
+	var (
+		gerritURL    = flag.String("gerrit", "https://upspin-review.googlesource.com", "Base `URL` of Gerrit instance")
+		githubOwner  = flag.String("github", "upspin", "GitHub `user` or organization")
+		pollInterval = flag.Duration("poll", 10*time.Minute, "Poll `interval`")
+	)
+	flag.Parse()
+	s := Sync{
+		GerritURL:    *gerritURL,
+		Owner:        *githubOwner,
+		PollInterval: *pollInterval,
+		AuthToken:    os.Getenv("GITSYNC_AUTH_TOKEN"),
+	}
+	if !strings.Contains(s.AuthToken, ":") {
+		fmt.Fprintln(os.Stderr, `You must set GITSYNC_AUTH_TOKEN to "username:personal-access-token".`)
+		os.Exit(2)
+	}
+	if err := s.run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
 type Sync struct {
 	GerritURL string // Base URL for Gerrit instance.
@@ -55,18 +78,6 @@ type GitHubStatus struct {
 	State       string
 	Description string
 	Target      string `json:"target_url"`
-}
-
-func main() {
-	s := Sync{
-		GerritURL:    "https://upspin-review.googlesource.com",
-		Owner:        "adg",
-		AuthToken:    "adg:REDACTED",
-		PollInterval: 10 * time.Minute,
-	}
-	if err := s.run(); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func (s *Sync) run() error {

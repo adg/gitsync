@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,36 +13,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/build/gerrit"
 )
 
 type Sync struct {
-	Host string // Gerrit Host
+	GerritURL string // Base URL for Gerrit instance.
 
 	Owner     string // GitHub owner (user or organization)
 	AuthToken string // GitHub authentication token (user:hex).
+
+	gerrit *gerrit.Client
 }
 
 type Change struct {
-	GerritChange *GerritChange
-	PullRequest  *PullRequest
-}
-
-// Gerrit API
-
-type GerritChange struct {
-	Project   string
-	ID        string `json:"change_id"`
-	Revision  string `json:"current_revision"`
-	Revisions map[string]GerritRevision
-	Subject   string
-}
-
-type GerritRevision struct {
-	Ref string
-}
-
-func (c *GerritChange) Ref() string {
-	return c.Revisions[c.Revision].Ref
+	*gerrit.ChangeInfo
+	*PullRequest
 }
 
 // GitHub API
@@ -69,7 +56,7 @@ type GitHubStatus struct {
 
 func main() {
 	s := Sync{
-		Host:      "upspin",
+		GerritURL: "https://upspin-review.googlesource.com",
 		Owner:     "adg",
 		AuthToken: "adg:REDACTED",
 	}
@@ -80,6 +67,9 @@ func main() {
 }
 
 func (s *Sync) run() error {
+	auth := gerrit.GitCookiesAuth()
+	s.gerrit = gerrit.NewClient(s.GerritURL, auth)
+
 	root, err := ioutil.TempDir("", "gitsync")
 	if err != nil {
 		return err
@@ -88,13 +78,13 @@ func (s *Sync) run() error {
 
 	changes := map[string]*Change{}
 
-	gChanges, err := s.gerritChanges()
+	cis, err := s.gerritChanges()
 	if err != nil {
 		return err
 	}
-	for _, gc := range gChanges {
-		changes[gc.ID] = &Change{
-			GerritChange: gc,
+	for _, ci := range cis {
+		changes[ci.ChangeID] = &Change{
+			ChangeInfo: ci,
 		}
 	}
 
@@ -122,40 +112,37 @@ func (s *Sync) run() error {
 
 	for _, c := range changes {
 		switch {
-		case c.PullRequest == nil && c.GerritChange != nil:
+		case c.PullRequest == nil && c.ChangeInfo != nil:
 			// Sync branch and create pull request.
-			gc := c.GerritChange
-			log.Printf("Gerrit change %v needs corresponding pull request. Creating one.", gc.ID)
-			dir := filepath.Join(root, gc.Project)
-			if err := s.syncBranch(dir, gc); err != nil {
+			ci := c.ChangeInfo
+			log.Printf("Gerrit change %v needs corresponding pull request. Creating one.", ci.ChangeID)
+			dir := filepath.Join(root, ci.Project)
+			if err := s.syncBranch(dir, ci); err != nil {
 				return err
 			}
-			if err := s.createPullRequest(gc); err != nil {
+			if err := s.createPullRequest(ci); err != nil {
 				return err
 			}
-		case c.PullRequest != nil && c.GerritChange != nil:
-			gc := c.GerritChange
-			if c.PullRequest.Head.SHA == c.GerritChange.Revision {
+		case c.PullRequest != nil && c.ChangeInfo != nil:
+			ci := c.ChangeInfo
+			if c.PullRequest.Head.SHA == c.ChangeInfo.CurrentRevision {
 				// Already in sync; nothing to do.
-				log.Printf("Gerrit change %v already synced with pull request.", gc.ID)
+				log.Printf("Gerrit change %v already synced with pull request.", ci.ChangeID)
 				if err := s.syncComments(c); err != nil {
 					return err
 				}
 				break
 			}
 			// Sync branch.
-			log.Printf("Gerrit change %v needs sync with pull request. Syncing.", gc.ID)
-			dir := filepath.Join(root, gc.Project)
-			if err := s.syncBranch(dir, gc); err != nil {
+			log.Printf("Gerrit change %v needs sync with pull request. Syncing.", ci.ChangeID)
+			dir := filepath.Join(root, ci.Project)
+			if err := s.syncBranch(dir, ci); err != nil {
 				return err
 			}
-		case c.PullRequest != nil && c.GerritChange == nil:
+		case c.PullRequest != nil && c.ChangeInfo == nil:
 			// Close pull request and delete branch.
 			pr := c.PullRequest
 			log.Printf("Pull request %v has no corresponding Gerrit change. Closing.", pr.Number)
-			if err := s.syncComments(c); err != nil {
-				return err
-			}
 			if err := s.closePullRequest(pr); err != nil {
 				return err
 			}
@@ -170,52 +157,28 @@ func (s *Sync) run() error {
 	return nil
 }
 
-func (s *Sync) gerritChanges() ([]*GerritChange, error) {
-	url := "https://" + s.Host + "-review.googlesource.com/changes/?q=is:open&o=CURRENT_REVISION"
-
-	body, err := ioutil.ReadFile("changes.json") // xxx
-	if err != nil {
-
-		r, err := http.Get(url)
-		if err != nil {
-			return nil, err
-		}
-		body, err = ioutil.ReadAll(r.Body)
-		r.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if r.StatusCode != http.StatusOK {
-			return nil, errors.New(r.Status)
-		}
-		body = bytes.TrimPrefix(body, []byte(")]}'\n"))
-
-		ioutil.WriteFile("changes.json", body, 0644) // xxx
-	}
-
-	var changes []*GerritChange
-	if err := json.Unmarshal(body, &changes); err != nil {
-		return nil, err
-	}
-
-	return changes, nil
+func (s *Sync) gerritChanges() ([]*gerrit.ChangeInfo, error) {
+	ctx := context.Background()
+	opt := gerrit.QueryChangesOpt{Fields: []string{"CURRENT_REVISION", "MESSAGES"}}
+	return s.gerrit.QueryChanges(ctx, "is:open", opt)
 }
 
-func (s *Sync) syncBranch(dir string, c *GerritChange) error {
+func (s *Sync) syncBranch(dir string, c *gerrit.ChangeInfo) error {
 	if err := s.clone(dir, c.Project); err != nil {
 		return err
 	}
 	// Switch to the branch for this change.
-	if err := git(dir, "checkout", c.ID); err != nil {
+	if err := git(dir, "checkout", c.ChangeID); err != nil {
 		// Branch doesn't exist for this change; create one.
-		err2 := git(dir, "checkout", "-b", c.ID)
+		err2 := git(dir, "checkout", "-b", c.ChangeID)
 		if err2 != nil {
 			return err
 		}
 	}
 	// Reset the branch to the current change head.
-	src := "https://" + s.Host + ".googlesource.com/" + c.Project
-	if err := git(dir, "fetch", src, c.Ref()); err != nil {
+	src := s.GerritURL + "/" + c.Project
+	ref := c.Revisions[c.CurrentRevision].Ref
+	if err := git(dir, "fetch", src, ref); err != nil {
 		return err
 	}
 	if err := git(dir, "reset", "--hard", "FETCH_HEAD"); err != nil {
@@ -223,7 +186,7 @@ func (s *Sync) syncBranch(dir string, c *GerritChange) error {
 	}
 	// Push the branch to GitHub.
 	dest := "https://" + s.AuthToken + "@github.com/" + s.Owner + "/" + c.Project
-	return git(dir, "push", "-f", dest, c.ID)
+	return git(dir, "push", "-f", dest, c.ChangeID)
 }
 
 func (s *Sync) deleteBranch(dir, repo, id string) error {
@@ -256,7 +219,7 @@ func (s *Sync) clone(dir, project string) error {
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return err
 	}
-	url := "https://" + s.Host + ".googlesource.com/" + project
+	url := s.GerritURL + "/" + project
 	if err := git(dir, "clone", url, dir); err != nil {
 		os.RemoveAll(dir)
 		return err
@@ -278,19 +241,19 @@ func (s *Sync) pullRequests(repo string) (prs []*PullRequest, err error) {
 	return prs, s.gitHub("repos/"+s.Owner+"/"+repo+"/pulls", nil, &prs)
 }
 
-func (s *Sync) createPullRequest(gc *GerritChange) error {
+func (s *Sync) createPullRequest(ci *gerrit.ChangeInfo) error {
 	payload := struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
 		Head  string `json:"head"`
 		Base  string `json:"base"`
 	}{
-		Title: gc.Subject,
-		Body:  "Automatically created pull request. Do not review.",
-		Head:  gc.ID,
+		Title: ci.Subject,
+		Body:  "Automatically created pull request. **Do not review or merge this PR.**",
+		Head:  ci.ChangeID,
 		Base:  "master",
 	}
-	return s.gitHub("repos/"+s.Owner+"/"+gc.Project+"/pulls", payload, nil)
+	return s.gitHub("repos/"+s.Owner+"/"+ci.Project+"/pulls", payload, nil)
 }
 
 func (s *Sync) closePullRequest(pr *PullRequest) error {
@@ -302,11 +265,16 @@ func (s *Sync) closePullRequest(pr *PullRequest) error {
 
 func (s *Sync) syncComments(c *Change) error {
 	pr := c.PullRequest
+	ci := c.ChangeInfo
+
+	// Fetch Pull Request statuses.
 	var statuses []*GitHubStatus
 	err := s.gitHub("repos/"+pr.Head.Repo.Name+"/commits/"+pr.Head.SHA+"/statuses", nil, &statuses)
 	if err != nil {
 		return err
 	}
+
+	ctx := context.Background()
 	for _, stat := range statuses {
 		if stat.Context != "continuous-integration/travis-ci/pr" {
 			continue
@@ -315,10 +283,26 @@ func (s *Sync) syncComments(c *Change) error {
 			continue
 		}
 		msg := fmt.Sprintf("%v: %v", stat.Description, stat.Target)
-		log.Println(msg)
-		// TODO(adg): check whether an equivalent Gerrit comment
-		// exists, and if not, post one.
+
+		// Check whether an equivalent Gerrit comment exists.
+		found := false
+		for _, m := range ci.Messages {
+			if strings.Contains(m.Message, msg) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// If no such comment exists, post it.
+			err = s.gerrit.SetReview(ctx, ci.ChangeID, ci.CurrentRevision, gerrit.ReviewInput{
+				Message: msg,
+			})
+			if err != nil {
+				return err
+			}
+		}
 	}
+
 	return nil
 }
 

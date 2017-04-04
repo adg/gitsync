@@ -61,6 +61,7 @@ type GitHubRevision struct {
 }
 
 type GitHubStatus struct {
+	Context     string
 	State       string
 	Description string
 	Target      string `json:"target_url"`
@@ -92,27 +93,26 @@ func (s *Sync) run() error {
 		return err
 	}
 	for _, gc := range gChanges {
-		log.Printf("%v %v %v %v", gc.Project, gc.ID, gc.Revision, gc.Ref())
-		c, ok := changes[gc.ID]
-		if !ok {
-			c = &Change{}
-			changes[gc.ID] = c
+		changes[gc.ID] = &Change{
+			GerritChange: gc,
 		}
-		c.GerritChange = gc
 	}
+
 	// TODO(adg): list repos
 	prs, err := s.pullRequests("upspin")
 	if err != nil {
 		return err
 	}
 	for _, pr := range prs {
-		log.Printf("PR: %v %v %v", pr.Number, pr.Head.Ref, pr.Head.SHA)
 		if !isGerritChange(pr.Head.Ref) {
 			continue
 		}
-		changes[pr.Head.Ref] = &Change{
-			PullRequest: pr,
+		c, ok := changes[pr.Head.Ref]
+		if !ok {
+			c = &Change{}
+			changes[pr.Head.Ref] = c
 		}
+		c.PullRequest = pr
 	}
 
 	for _, c := range changes {
@@ -301,6 +301,16 @@ func (s *Sync) syncComments(c *Change) error {
 	err := s.gitHub("repos/"+pr.Head.Repo.Name+"/commits/"+pr.Head.SHA+"/statuses", nil, &statuses)
 	if err != nil {
 		return err
+	}
+	for _, stat := range statuses {
+		if stat.Context != "continuous-integration/travis-ci/pr" {
+			continue
+		}
+		if stat.State != "success" && stat.State != "failure" {
+			continue
+		}
+		msg := fmt.Sprintf("%v: %v", stat.Description, stat.Target)
+		log.Println(msg)
 	}
 	return nil
 }

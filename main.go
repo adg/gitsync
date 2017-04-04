@@ -14,6 +14,13 @@ import (
 	"strings"
 )
 
+type Sync struct {
+	Host string // Gerrit Host
+
+	Owner     string // GitHub owner (user or organization)
+	AuthToken string // GitHub authentication token (user:hex).
+}
+
 type Change struct {
 	GerritChange *GerritChange
 	PullRequest  *PullRequest
@@ -53,11 +60,10 @@ type GitHubRevision struct {
 	}
 }
 
-type Sync struct {
-	Host string // Gerrit Host
-
-	Owner     string // GitHub owner (user or organization)
-	AuthToken string // GitHub authentication token (user:hex).
+type GitHubStatus struct {
+	State       string
+	Description string
+	Target      string `json:"target_url"`
 }
 
 func main() {
@@ -263,31 +269,11 @@ func git(dir string, args ...string) error {
 	return nil
 }
 
-func (s *Sync) pullRequests(repo string) ([]*PullRequest, error) {
-	url := "https://" + s.AuthToken + "@api.github.com/repos/" + s.Owner + "/" + repo + "/pulls"
-	r, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	body, err := ioutil.ReadAll(r.Body)
-	r.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if r.StatusCode != http.StatusOK {
-		return nil, errors.New(r.Status)
-	}
-
-	var prs []*PullRequest
-	if err := json.Unmarshal(body, &prs); err != nil {
-		return nil, err
-	}
-
-	return prs, nil
+func (s *Sync) pullRequests(repo string) (prs []*PullRequest, err error) {
+	return prs, s.gitHub("repos/"+s.Owner+"/"+repo+"/pulls", nil, &prs)
 }
 
 func (s *Sync) createPullRequest(gc *GerritChange) error {
-	url := "https://" + s.AuthToken + "@api.github.com/repos/" + s.Owner + "/" + gc.Project + "/pulls"
 	payload := struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
@@ -299,41 +285,55 @@ func (s *Sync) createPullRequest(gc *GerritChange) error {
 		Head:  gc.ID,
 		Base:  "master",
 	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	r, err := http.Post(url, "application/json", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	r.Body.Close()
-	if r.StatusCode != http.StatusCreated {
-		return errors.New(r.Status)
-	}
-	return nil
+	return s.gitHub("repos/"+s.Owner+"/"+gc.Project+"/pulls", payload, nil)
 }
 
 func (s *Sync) closePullRequest(pr *PullRequest) error {
-	url := "https://" + s.AuthToken + "@api.github.com/repos/" + pr.Head.Repo.Name + "/pulls/" + fmt.Sprint(pr.Number)
-	payload := `{"state":"closed"}`
-	r, err := http.Post(url, "application/json", strings.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	r.Body.Close()
-	if r.StatusCode != http.StatusOK {
-		return errors.New(r.Status)
-	}
-	return nil
+	payload := struct {
+		State string `json:"state"`
+	}{"closed"}
+	return s.gitHub("repos/"+pr.Head.Repo.Name+"/pulls/"+fmt.Sprint(pr.Number), payload, nil)
 }
 
 func (s *Sync) syncComments(c *Change) error {
 	pr := c.PullRequest
-	gc := c.GerritChange
-	url := "https://" + s.AuthToken + "@api.github.com/repos/" + pr.Head.Repo.Name + "/commits/" + gc.ID + "/statuses"
-	_ = url
+	var statuses []*GitHubStatus
+	err := s.gitHub("repos/"+pr.Head.Repo.Name+"/commits/"+pr.Head.SHA+"/statuses", nil, &statuses)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Sync) gitHub(path string, payload, result interface{}) error {
+	url := "https://" + s.AuthToken + "@api.github.com/" + path
+
+	var r *http.Response
+	var err error
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		r, err = http.Post(url, "application/json", bytes.NewReader(b))
+	} else {
+		r, err = http.Get(url)
+	}
+	if err != nil {
+		return err
+	}
+	b, err := ioutil.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		return err
+	}
+	if r.StatusCode/100 != 2 {
+		return errors.New(r.Status)
+	}
+	if result == nil {
+		return nil
+	}
+	return json.Unmarshal(b, result)
 }
 
 func isGerritChange(id string) bool {

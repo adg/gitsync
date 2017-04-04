@@ -98,21 +98,26 @@ func (s *Sync) run() error {
 		}
 	}
 
-	// TODO(adg): list repos
-	prs, err := s.pullRequests("upspin")
+	repos, err := s.githubRepos()
 	if err != nil {
 		return err
 	}
-	for _, pr := range prs {
-		if !isGerritChange(pr.Head.Ref) {
-			continue
+	for _, repo := range repos {
+		prs, err := s.pullRequests(repo)
+		if err != nil {
+			return err
 		}
-		c, ok := changes[pr.Head.Ref]
-		if !ok {
-			c = &Change{}
-			changes[pr.Head.Ref] = c
+		for _, pr := range prs {
+			if !isGerritChange(pr.Head.Ref) {
+				continue
+			}
+			c, ok := changes[pr.Head.Ref]
+			if !ok {
+				c = &Change{}
+				changes[pr.Head.Ref] = c
+			}
+			c.PullRequest = pr
 		}
-		c.PullRequest = pr
 	}
 
 	for _, c := range changes {
@@ -311,8 +316,25 @@ func (s *Sync) syncComments(c *Change) error {
 		}
 		msg := fmt.Sprintf("%v: %v", stat.Description, stat.Target)
 		log.Println(msg)
+		// TODO(adg): check whether an equivalent Gerrit comment
+		// exists, and if not, post one.
 	}
 	return nil
+}
+
+func (s *Sync) githubRepos() ([]string, error) {
+	var result []struct {
+		Name string
+	}
+	err := s.gitHub("users/"+s.Owner+"/repos", nil, &result)
+	if err != nil {
+		return nil, err
+	}
+	var repos []string
+	for _, r := range result {
+		repos = append(repos, r.Name)
+	}
+	return repos, nil
 }
 
 func (s *Sync) gitHub(path string, payload, result interface{}) error {

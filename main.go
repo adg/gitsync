@@ -28,7 +28,7 @@ func main() {
 	flag.Parse()
 	s := Sync{
 		GerritURL:    *gerritURL,
-		Owner:        *githubOwner,
+		GitHubOwner:  *githubOwner,
 		PollInterval: *pollInterval,
 		AuthToken:    os.Getenv("GITSYNC_AUTH_TOKEN"),
 	}
@@ -44,8 +44,8 @@ func main() {
 type Sync struct {
 	GerritURL string // Base URL for Gerrit instance.
 
-	Owner     string // GitHub owner (user or organization)
-	AuthToken string // GitHub authentication token (user:hex).
+	GitHubOwner string // GitHub owner (user or organization)
+	AuthToken   string // GitHub authentication token (user:hex).
 
 	PollInterval time.Duration
 
@@ -209,7 +209,7 @@ func (s *Sync) syncBranch(dir string, c *gerrit.ChangeInfo) error {
 		return err
 	}
 	// Push the branch to GitHub.
-	dest := "https://" + s.AuthToken + "@github.com/" + s.Owner + "/" + c.Project
+	dest := "https://" + s.AuthToken + "@github.com/" + s.GitHubOwner + "/" + c.Project
 	return git(dir, "push", "-f", dest, c.ChangeID)
 }
 
@@ -218,7 +218,7 @@ func (s *Sync) deleteBranch(dir, repo, id string) error {
 		return err
 	}
 	// Delete the remote branch.
-	dest := "https://" + s.AuthToken + "@github.com/" + s.Owner + "/" + repo
+	dest := "https://" + s.AuthToken + "@github.com/" + s.GitHubOwner + "/" + repo
 	if err := git(dir, "push", "--delete", dest, id); err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func git(dir string, args ...string) error {
 }
 
 func (s *Sync) pullRequests(repo string) (prs []*PullRequest, err error) {
-	return prs, s.gitHub("repos/"+s.Owner+"/"+repo+"/pulls", nil, &prs)
+	return prs, s.github("repos/"+s.GitHubOwner+"/"+repo+"/pulls", nil, &prs)
 }
 
 func (s *Sync) createPullRequest(ci *gerrit.ChangeInfo) error {
@@ -277,14 +277,14 @@ func (s *Sync) createPullRequest(ci *gerrit.ChangeInfo) error {
 		Head:  ci.ChangeID,
 		Base:  "master",
 	}
-	return s.gitHub("repos/"+s.Owner+"/"+ci.Project+"/pulls", payload, nil)
+	return s.github("repos/"+s.GitHubOwner+"/"+ci.Project+"/pulls", payload, nil)
 }
 
 func (s *Sync) closePullRequest(pr *PullRequest) error {
 	payload := struct {
 		State string `json:"state"`
 	}{"closed"}
-	return s.gitHub("repos/"+pr.Head.Repo.Name+"/pulls/"+fmt.Sprint(pr.Number), payload, nil)
+	return s.github("repos/"+pr.Head.Repo.Name+"/pulls/"+fmt.Sprint(pr.Number), payload, nil)
 }
 
 func (s *Sync) syncComments(c *Change) error {
@@ -293,7 +293,7 @@ func (s *Sync) syncComments(c *Change) error {
 
 	// Fetch Pull Request statuses.
 	var statuses []*GitHubStatus
-	err := s.gitHub("repos/"+pr.Head.Repo.Name+"/commits/"+pr.Head.SHA+"/statuses", nil, &statuses)
+	err := s.github("repos/"+pr.Head.Repo.Name+"/commits/"+pr.Head.SHA+"/statuses", nil, &statuses)
 	if err != nil {
 		return err
 	}
@@ -334,7 +334,7 @@ func (s *Sync) githubRepos() ([]string, error) {
 	var result []struct {
 		Name string
 	}
-	err := s.gitHub("users/"+s.Owner+"/repos", nil, &result)
+	err := s.github("users/"+s.GitHubOwner+"/repos", nil, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +345,7 @@ func (s *Sync) githubRepos() ([]string, error) {
 	return repos, nil
 }
 
-func (s *Sync) gitHub(path string, payload, result interface{}) error {
+func (s *Sync) github(path string, payload, result interface{}) error {
 	url := "https://" + s.AuthToken + "@api.github.com/" + path
 
 	var r *http.Response

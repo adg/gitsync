@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/build/gerrit"
 )
@@ -22,6 +23,8 @@ type Sync struct {
 
 	Owner     string // GitHub owner (user or organization)
 	AuthToken string // GitHub authentication token (user:hex).
+
+	PollInterval time.Duration
 
 	gerrit *gerrit.Client
 }
@@ -56,11 +59,11 @@ type GitHubStatus struct {
 
 func main() {
 	s := Sync{
-		GerritURL: "https://upspin-review.googlesource.com",
-		Owner:     "adg",
-		AuthToken: "adg:REDACTED",
+		GerritURL:    "https://upspin-review.googlesource.com",
+		Owner:        "adg",
+		AuthToken:    "adg:REDACTED",
+		PollInterval: 10 * time.Minute,
 	}
-
 	if err := s.run(); err != nil {
 		log.Fatal(err)
 	}
@@ -76,6 +79,16 @@ func (s *Sync) run() error {
 	}
 	defer os.RemoveAll(root)
 
+	for range time.Tick(s.PollInterval) {
+		if err := s.poll(root); err != nil {
+			// TODO(adg): retry?
+			return err
+		}
+	}
+	panic("unreachable")
+}
+
+func (s *Sync) poll(root string) error {
 	changes := map[string]*Change{}
 
 	cis, err := s.gerritChanges()

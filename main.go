@@ -22,8 +22,10 @@ import (
 func main() {
 	var (
 		gerritURL    = flag.String("gerrit", "https://upspin-review.googlesource.com", "Base `URL` of Gerrit instance")
-		githubOwner  = flag.String("github", "upspin", "GitHub `user` or organization")
-		pollInterval = flag.Duration("poll", 10*time.Minute, "Poll `interval`")
+		githubOwner  = flag.String("github", "AugieBot", "GitHub `user` or organization")
+		pollInterval = flag.Duration("poll", 10*time.Minute, "Poll `interval` (ignored when -cron set)")
+		workDir      = flag.String("dir", "", "Work `directory`, if empty $TMPDIR is used")
+		cronJob      = flag.Bool("cron", false, "Run once only; do not poll")
 	)
 	flag.Parse()
 	s := Sync{
@@ -36,7 +38,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, `You must set GITSYNC_AUTH_TOKEN to "username:personal-access-token".`)
 		os.Exit(2)
 	}
-	if err := s.run(); err != nil {
+	if err := s.run(*workDir, *cronJob); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -80,15 +82,22 @@ type GitHubStatus struct {
 	Target      string `json:"target_url"`
 }
 
-func (s *Sync) run() error {
+func (s *Sync) run(root string, cron bool) error {
 	auth := gerrit.GitCookiesAuth()
 	s.gerrit = gerrit.NewClient(s.GerritURL, auth)
 
-	root, err := ioutil.TempDir("", "gitsync")
-	if err != nil {
-		return err
+	if root == "" {
+		var err error
+		root, err = ioutil.TempDir("", "gitsync")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(root)
 	}
-	defer os.RemoveAll(root)
+
+	if cron {
+		return s.poll(root)
+	}
 
 	for range time.Tick(s.PollInterval) {
 		if err := s.poll(root); err != nil {

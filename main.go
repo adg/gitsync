@@ -331,8 +331,15 @@ func (s *Sync) syncComments(c *Change) error {
 		}
 		if !found {
 			// If no such comment exists, post it.
+			var labels map[string]int
+			if stat.State == "failure" {
+				labels = map[string]int{
+					"Code-Review": -1,
+				}
+			}
 			err = s.gerrit.SetReview(ctx, ci.ChangeID, ci.CurrentRevision, gerrit.ReviewInput{
 				Message: msg,
+				Labels:  labels,
 			})
 			if err != nil {
 				return err
